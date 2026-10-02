@@ -5,11 +5,22 @@ import java.util.Set
 
 // ==========================================================================
 // ErrorClassificationResult
+//
+// Purpose:
+// Standard data structure used to return classification results.
+//
+// Contains:
+// - Error category (TECHNICAL, BUSINESS, UNKNOWN)
+// - Severity
+// - Human-readable reason
+// - Root cause exception
+//
+// This object is created by the classification engine and consumed
+// by the MPL enrichment and monitoring logic.
 // ==========================================================================
 
 class ErrorClassificationResult {
     String category
-    boolean retryable
     String severity
     String reason
     Throwable rootCause
@@ -17,6 +28,18 @@ class ErrorClassificationResult {
 
 // ==========================================================================
 // ErrorUtils
+//
+// Purpose:
+// Provides reusable helper methods used throughout the framework.
+//
+// Responsibilities:
+// - Extract HTTP status codes
+// - Resolve the deepest exception in a cause chain
+// - Retrieve root cause class names
+// - Retrieve root cause messages
+//
+// This class contains utility functions only and does not perform
+// classification.
 // ==========================================================================
 
 class ErrorUtils {
@@ -79,6 +102,23 @@ class ErrorUtils {
 
 // ==========================================================================
 // ExceptionRegistry
+//
+// Purpose:
+// Maintains the catalog of known exception types and their
+// corresponding classifications.
+//
+// Responsibilities:
+// - Classify known exception types
+// - Determine severity
+//
+// Classification is performed based on exception type inheritance.
+//
+// Examples:
+// - UnknownHostException      -> TECHNICAL
+// - SocketTimeoutException    -> TECHNICAL
+// - UriNotMatchingException   -> TECHNICAL
+//
+// Returns UNKNOWN when no matching exception is found.
 // ==========================================================================
 
 class ExceptionRegistry {
@@ -91,47 +131,40 @@ class ExceptionRegistry {
         
         (java.net.SocketTimeoutException): [
             category : "TECHNICAL",
-            retryable: true,
             severity : "HIGH"
         ],
 
         (java.net.ConnectException): [
             category : "TECHNICAL",
-            retryable: true,
             severity : "HIGH"
         ],
 
         (java.net.UnknownHostException): [
             category : "TECHNICAL",
-            retryable: true,
             severity : "HIGH"
         ],
 
         (java.net.NoRouteToHostException): [
             category : "TECHNICAL",
-            retryable: true,
             severity : "HIGH"
         ],
 
         (javax.net.ssl.SSLHandshakeException): [
             category : "TECHNICAL",
-            retryable: false,
             severity : "HIGH"
         ],
 
         (javax.net.ssl.SSLException): [
             category : "TECHNICAL",
-            retryable: false,
             severity : "HIGH"
         ],
 
         // ==============================================================
-        // Functional Errors
+        // Configuration / Implementation Errors
         // ==============================================================
 
         (org.apache.olingo.odata2.api.uri.UriNotMatchingException): [
-            category : "FUNCTIONAL",
-            retryable: false,
+            category : "TECHNICAL",
             severity : "MEDIUM"
         ]
     ]
@@ -162,7 +195,6 @@ class ExceptionRegistry {
 
         return new ErrorClassificationResult(
             category : config.category,
-            retryable: config.retryable,
             severity : config.severity,
             reason   : rootCause?.getMessage() ?: "No error message available",
             rootCause: rootCause
@@ -174,7 +206,6 @@ class ExceptionRegistry {
 
         return new ErrorClassificationResult(
             category : "UNKNOWN",
-            retryable: false,
             severity : "MEDIUM",
             reason   : rootCause?.getMessage()
                        ?: "No error message available",
@@ -206,42 +237,32 @@ class ExceptionRegistry {
 
 // ==========================================================================
 // BusinessRuleRegistry
+//
+// Purpose:
+// Handles business-specific error classifications.
+//
+// Responsibilities:
+// - Evaluate business classification rules
+// - Classify BUSINESS errors
+// - Return null when no business rule matches
+//
+// Current Implementation:
+// - Uses POM_BusinessError as the business classification trigger
+//
+// This registry is only evaluated when ExceptionRegistry returns
+// UNKNOWN.
 // ==========================================================================
 
 class BusinessRuleRegistry {
 
     static ErrorClassificationResult classify(
-        Message message,
-        String errorMessage) {
-            
-            errorMessage = errorMessage?.trim()
+        Message message) {
 
-            // ------------------------------------------------------------------
-            // Classification order:
-            // 1. ExceptionRegistry
-            // 2. BusinessRuleRegistry
-            // 3. HTTP fallback rules
-            // 4. UNKNOWN
-            //
-            // Purpose:
-            // Handles business-specific validation scenarios that cannot be
-            // reliably identified through exception types alone.
-            //
-            // Future examples:
-            // - Employee already exists
-            // - Posting period closed
-            // - Cost center inactive
-            // - Duplicate candidate
-            // - Business process not allowed
-            //
-            // Return null when no business rule matches.
-            // ------------------------------------------------------------------
-             
             String businessError = message.getProperty("POM_BusinessError")?.trim()
+            
             if (businessError) {
                 return new ErrorClassificationResult(
                         category : "BUSINESS",
-                        retryable: false,
                         severity : "LOW",
                         reason : businessError
                 )
@@ -253,6 +274,32 @@ class BusinessRuleRegistry {
 
 // ==========================================================================
 // GlobalErrorClassifier
+//
+// Purpose:
+// Central orchestration engine responsible for determining the final
+// error classification.
+//
+// Classification Order:
+// 1. ExceptionRegistry
+// 2. BusinessRuleRegistry
+// 3. HTTP Fallback Rules
+// 4. UNKNOWN
+//
+// Architecture:
+//
+// processData()
+// │
+// ▼
+// GlobalErrorClassifier
+// │
+// ├── ExceptionRegistry
+// ├── BusinessRuleRegistry
+// └── ErrorUtils
+//
+// The first successful classification wins.
+//
+// This class acts as the single entry point for all framework
+// classification logic.
 // ==========================================================================
 
 class GlobalErrorClassifier {
@@ -269,9 +316,7 @@ class GlobalErrorClassifier {
         }
 
         ErrorClassificationResult businessResult =
-            BusinessRuleRegistry.classify(
-                message,
-                result.reason)
+            BusinessRuleRegistry.classify(message)
 
         if (businessResult != null) {
             return businessResult
@@ -290,7 +335,6 @@ class GlobalErrorClassifier {
 
                     return new ErrorClassificationResult(
                         category : "TECHNICAL",
-                        retryable: true,
                         severity : "HIGH",
                         reason   :
                                 "Target system returned HTTP ${httpStatus}",
@@ -316,10 +360,6 @@ def Message processData(Message message) {
             GlobalErrorClassifier.classify(
                     message,
                     exception)
-
-    boolean debugMode =
-        "true".equalsIgnoreCase(
-                message.getProperty("POM_DebugMode")?.toString())
 
     String interfaceName =
             message.getHeader("POM_InterfaceName", String) ?:
@@ -354,7 +394,6 @@ def Message processData(Message message) {
 
     [
         "POM_ErrorCategory"    : result.category,
-        "POM_Retryable"        : result.retryable.toString(),
         "POM_Severity"         : result.severity,
         "POM_HttpStatus"       : httpStatus?.toString() ?: "",
         "POM_RootCauseClass"   : rootCauseClass,
@@ -401,10 +440,6 @@ def Message processData(Message message) {
                 "${interfaceId}_${businessId}_${dateString}")
 
         messageLog.addCustomHeaderProperty(
-                "POM_Retryable",
-                result.retryable.toString())
-
-        messageLog.addCustomHeaderProperty(
                 "POM_Severity",
                 result.severity)
 
@@ -415,12 +450,6 @@ def Message processData(Message message) {
         messageLog.addCustomHeaderProperty(
                 "POM_RootCauseClass",
                 rootCauseClass)
-
-        if (debugMode) {
-                messageLog.addCustomHeaderProperty(
-                        "POM_RootCauseFullClass",
-                        result.rootCause?.getClass()?.getName() ?: "Unknown")
-        }
 
         messageLog.addCustomHeaderProperty(
                 "POM_RootCauseMessage",
