@@ -328,6 +328,21 @@ class GlobalErrorClassifier {
 
             switch (httpStatus) {
 
+                // Client-side / Integration Errors
+                
+                case 400:
+                case 401:
+                case 403:
+                case 404:
+
+                    return new ErrorClassificationResult(
+                        category : "TECHNICAL",
+                        severity : "MEDIUM",
+                        reason   :
+                                "Target system returned HTTP ${httpStatus}",
+                        rootCause: result.rootCause
+                    )
+
                 case 500:
                 case 502:
                 case 503:
